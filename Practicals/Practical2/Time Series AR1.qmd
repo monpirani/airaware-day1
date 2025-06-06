@@ -1,0 +1,241 @@
+---
+title: "Time Series"
+format:
+  html:
+    theme: cosmo
+    toc: true
+    code-copy: true
+execute:
+  echo: true
+  warning: false
+  message: false
+editor: visual
+---
+
+# Daily Climate Data for Delhi, India
+
+This file contains weather data collected in the city of Delhi from the period 1st January 2017 to 24th April 2017. This is purely academic dataset and is developed as a part of Data Analytics course of 2019 at PES University, Bangalore.
+
+The data consists of:
+
+-   `date`: daily date for 1st January 2017 to 24th April 2017
+
+-   `meantemp`: mean temperature averaged out from multiple 3 hour intervals in a day, measured in: $^\circ C$
+
+-   `humidity`: recorded daily mean relative humidity in $g / m^3$
+
+-   `wind_speed`: recorded daily mean wind speed in $kmph$
+
+-   `meanpressure`: recorded daily mean pressure in $atm$
+
+## Required Packages
+
+```{r}
+#| eval: true
+#| echo: true
+#| message: false
+
+library(tidyverse)
+library(lubridate)
+library(INLA)
+library(inlabru)
+library(viridis)
+library(ggpubr)
+
+```
+
+## New Delhi Climate Data
+
+We observe 114 daily measurements for temperature, humidity, wind speed and relative pressure. We will focus on the temperature variable
+
+-   Load in data
+
+```{r}
+#| message: false
+
+
+climate <- read.csv(file = "DailyDelhiClimateTest.csv")
+
+```
+
+-   We first want to visualise this data. However, the dates are in Year-Month-Day format
+
+-   We use the `lubridate` package to create a time index $t \in \{1,2,...,114\}$
+
+```{r}
+
+climate$date <- as.Date(climate$date, format= "%Y-%m-%d")
+
+climate$time <- match(lubridate::ymd(climate$date), sort(lubridate::ymd(climate$date)))
+
+```
+
+-   Now we can simply plot the temperature data as a time series
+
+```{r}
+
+ggplot() +
+  geom_line(climate, mapping = aes(x = time, y = meantemp))
+
+
+```
+
+## Time Series Model
+
+We will fit an autoregressive model with order 1 (AR1) to estimate the main change over time.
+
+The model we fit is:
+
+$$
+y_t = \beta_0 + u_t + e_t \\
+u_i = \rho u_{t-1} + \epsilon_t
+$$
+
+with
+
+-   Gaussian mean error: $e_i \sim N(0,\tau_{e})$
+
+-   Starting distribution: $u_1 \sim N(0, \tau_u (1 - \rho^2)^{-1})$.
+
+-   Intercept: $\beta_0$
+
+-   Temporal correlation term: $\rho$ with $|\rho| < 1$
+
+We fit the model using the `INLA` package:
+
+-   Specify the model formula using the `ar1`
+
+```{r}
+
+f1 <- meantemp ~ 1 + f(time, model = "ar1")
+
+
+```
+
+-   Run the model
+
+```{r}
+
+climate.out1 <- inla(formula = f1,
+                    family = "gaussian",
+                    data = climate)
+
+summary(climate.out1)
+
+```
+
+We have:
+
+-   Posterior mean estimated intercept: $\hat{\beta_0}=22.4$, i.e. the average mean temperature is $22.4^\circ C$
+
+-   Posterior mean estimated precision for the Gasussian error term: $\hat{\tau_e} = 22800$
+
+-   Posterior mean estimated precision for the AR1 term: $\hat{\tau_u} = 0.026$
+
+-   Posterior mean estimated range for the AR1 term: $\hat{\rho} = 0.963$
+
+## Model Output
+
+-   We can extract both model outputs and plot the fitted time series with 95% credible intervals
+
+```{r}
+
+climate$temp.ar1 <- climate.out1$summary.fitted.values[,"mean"]
+climate$temp.025.ar1 <- climate.out1$summary.fitted.values[,"0.025quant"]
+climate$temp.975.ar1 <- climate.out1$summary.fitted.values[,"0.975quant"]
+  
+
+```
+
+-   And plot!
+
+```{r}
+p1 <- ggplot(climate, aes(x = time)) +
+
+  # Plot fitted values
+  geom_line(aes(y = temp.ar1, color = "Estimated"), linewidth = 0.8, linetype = "solid") +
+  geom_point(aes(y = temp.ar1, color = "Estimated"), size = 1) +
+  
+  # Plot observed values
+  geom_line(aes(y = meantemp, color = "Observed"), linewidth = 0.6) +
+  geom_point(aes(y = meantemp, color = "Observed"), size = 0.8) +
+  
+  # Plot the 95% credible interval (shaded region)
+  geom_ribbon(aes(ymin = temp.025.ar1, ymax = temp.975.ar1), fill = "red", alpha = 0.3) 
+
+p1
+
+```
+
+... maybe it's a little overfit!
+
+To combat this, we can set some Bayesian priors on the model
+
+We can set:
+
+-   a prior on the precision of the Gaussian model: $\tau_e$
+
+-   a prior on the precision of the `ar1` model: $\tau_u$
+
+What scale are we working on?
+
+```{r}
+
+range(climate$meantemp)
+
+mean(climate$meantemp)
+
+sd(climate$meantemp)
+
+var(climate$meantemp)
+
+```
+
+-   We set a Gamma priors for the precisions that are centered around the variance of the temperature (1/40 = 0.025) with small variance (1/0.01 = 100)
+
+-   We include it as part of the `ar1` model term (for $\tau_u$) and `control.fammily` (for $\tau_e$).
+
+```{r}
+
+f2 <- meantemp ~ 1 + f(time, model = "ar1", hyper = list(prec = list(param = c(0.025, 100))))
+
+
+climate.out2 <- inla(formula = f2,
+                     family = "gaussian",
+                     data = climate,
+                     control.family = list(hyper = list(prec = list(param = c(0.025, 100)))))
+
+summary(climate.out2) 
+
+
+```
+
+-   And plot
+
+```{r}
+
+climate$temp.ar1.2 <- climate.out2$summary.fitted.values[,"mean"]
+climate$temp.025.ar1.2 <- climate.out2$summary.fitted.values[,"0.025quant"]
+climate$temp.975.ar1.2 <- climate.out2$summary.fitted.values[,"0.975quant"]
+
+  
+p2 <- ggplot(climate, aes(x = time)) +
+
+  # Plot fitted values
+  geom_line(aes(y = temp.ar1.2, color = "Estimated"), linewidth = 0.8, linetype = "solid") +
+  geom_point(aes(y = temp.ar1.2, color = "Estimated"), size = 1) +
+  
+  # Plot observed values
+  geom_line(aes(y = meantemp, color = "Observed"), linewidth = 0.6) +
+  geom_point(aes(y = meantemp, color = "Observed"), size = 0.8) +
+  
+  # Plot the 95% credible interval (shaded region)
+  geom_ribbon(aes(ymin = temp.025.ar1.2, ymax = temp.975.ar1.2), fill = "red", alpha = 0.3) 
+
+ggarrange(p1, p2, nrow = 2, ncol = 1)
+
+```
+
+## This looks more like a model for the underlying trend in temperature!
+
+## 
